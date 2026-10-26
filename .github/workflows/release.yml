@@ -1,5 +1,17 @@
 name: Build and Release
 
+# Pushing a v* tag builds MicroSlate and a dual-boot image with the Korean CrossPoint
+# fork (crosspoint-reader-ko), then publishes a GitHub release.
+#
+# Assets:
+#   microslate-<tag>.bin         MicroSlate alone, full image (flash at 0x0)
+#   microslate-<tag>-app.bin     MicroSlate app only (second OTA slot, 0x6B0000 on the Korean layout)
+#   dualboot-ko-<tag>.bin        CrossPoint (Korean) + MicroSlate, full image (flash at 0x0,
+#                                erases settings and Bluetooth pairing)
+#
+# CrossPoint and MicroSlate need different PlatformIO platforms (pioarduino vs
+# espressif32 6.12), so they build in separate jobs.
+
 on:
   push:
     tags:
@@ -8,10 +20,74 @@ on:
 permissions:
   contents: write
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+env:
+  CROSSPOINT_REPO: crosspoint-reader-ko/crosspoint-reader-ko
+  CROSSPOINT_REF: feature/dualboot-microslate
 
+jobs:
+  crosspoint:
+    runs-on: ubuntu-latest
+    env:
+      PIO_ENV: gh_release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CROSSPOINT_REPO }}
+          ref: ${{ env.CROSSPOINT_REF }}
+          submodules: recursive
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-crosspoint-gh_release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - name: Install PlatformIO Core (pioarduino)
+        run: |
+          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip esptool
+          uv pip install --system -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
+            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
+            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
+            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+
+      - name: Pin pioarduino core inside the platform penv
+        run: |
+          set -euo pipefail
+          pio pkg install -e "$PIO_ENV"
+          uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
+
+      - name: Build CrossPoint
+        run: pio run -e "$PIO_ENV" -j1
+
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p cp
+          cp .pio/build/$PIO_ENV/{bootloader.bin,partitions.bin,firmware.bin} cp/
+          git rev-parse HEAD > cp/COMMIT
+          sed -n 's/^version = //p' platformio.ini | head -n1 > cp/VERSION
+          ls -l cp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crosspoint
+          path: cp/*
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    needs: crosspoint
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -28,65 +104,69 @@ jobs:
           python-version: '3.11'
 
       - name: Install PlatformIO
-        run: pip install platformio
+        run: pip install platformio esptool
 
-      - name: Build firmware
+      - name: Build MicroSlate
         run: pio run
 
-      - name: Merge binaries
+      - uses: actions/download-artifact@v4
+        with:
+          name: crosspoint
+          path: cp
+
+      - name: Merge images
         run: |
-          pip install esptool
+          set -euo pipefail
+          TAG=${{ github.ref_name }}
+          B=.pio/build/xteink_x4
           BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
 
           esptool.py --chip esp32c3 merge_bin \
             --flash_mode dio --flash_size 16MB \
-            -o microslate-${{ github.ref_name }}.bin \
-            0x0     .pio/build/xteink_x4/bootloader.bin \
-            0x8000  .pio/build/xteink_x4/partitions.bin \
+            -o microslate-$TAG.bin \
+            0x0     $B/bootloader.bin \
+            0x8000  $B/partitions.bin \
             0xe000  "$BOOT_APP0" \
-            0x10000 .pio/build/xteink_x4/firmware.bin
+            0x10000 $B/firmware.bin
+          cp $B/firmware.bin microslate-$TAG-app.bin
 
-          if curl -f -o crosspoint-app.bin https://typeslate.com/tools/crosspoint/firmware/app.bin; then
-            esptool.py --chip esp32c3 merge_bin \
-              --flash_mode dio --flash_size 16MB \
-              -o dualboot-${{ github.ref_name }}.bin \
-              0x0      .pio/build/xteink_x4/bootloader.bin \
-              0x8000   .pio/build/xteink_x4/partitions.bin \
-              0xe000   "$BOOT_APP0" \
-              0x10000  crosspoint-app.bin \
-              0x650000 .pio/build/xteink_x4/firmware.bin
-            echo "DUALBOOT_BUILT=true" >> $GITHUB_ENV
-          else
-            echo "CrossPoint app.bin not on website yet, skipping dual-boot build"
-            echo "DUALBOOT_BUILT=false" >> $GITHUB_ENV
-          fi
+          # Find app1 in the CrossPoint partition table and check both apps fit.
+          read APP1_OFF APP1_SIZE < <(python3 scripts/ota1.py cp/partitions.bin)
+          echo "app1: $APP1_OFF size $APP1_SIZE"
+          for f in cp/firmware.bin $B/firmware.bin; do
+            size=$(stat -c %s "$f")
+            echo "$f: $size bytes"
+            [ "$size" -le $((APP1_SIZE)) ] || { echo "::error::$f does not fit the app slot"; exit 1; }
+          done
+
+          # otadata is left blank (0xFF), so the device boots CrossPoint first.
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o dualboot-ko-$TAG.bin \
+            0x0       cp/bootloader.bin \
+            0x8000    cp/partitions.bin \
+            0x10000   cp/firmware.bin \
+            $APP1_OFF $B/firmware.bin
+          ls -l *.bin
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          NOTES=docs/release-notes/${{ github.ref_name }}.md
+          if [ -f "$NOTES" ]; then cp "$NOTES" notes.md; else : > notes.md; fi
+          {
+            echo
+            echo "---"
+            echo "Dual-boot CrossPoint: \`$CROSSPOINT_REPO\` $(cat cp/VERSION), commit \`$(cat cp/COMMIT)\`"
+          } >> notes.md
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             microslate-${{ github.ref_name }}.bin
-            dualboot-${{ github.ref_name }}.bin
-          fail_on_unmatched_files: false
+            microslate-${{ github.ref_name }}-app.bin
+            dualboot-ko-${{ github.ref_name }}.bin
+          fail_on_unmatched_files: true
+          body_path: notes.md
           generate_release_notes: true
-
-      - name: Update firmware on typeslate website
-        env:
-          WEBSITE_PAT: ${{ secrets.WEBSITE_PAT }}
-        run: |
-          git clone https://x-access-token:${WEBSITE_PAT}@github.com/josh-websites/typeslate-website.git website
-          cp microslate-${{ github.ref_name }}.bin website/tools/microslate/firmware/latest.bin
-          echo '{"version":"${{ github.ref_name }}"}' > website/tools/microslate/firmware/version.json
-
-          if [ "$DUALBOOT_BUILT" = "true" ]; then
-            cp dualboot-${{ github.ref_name }}.bin website/tools/microslate/firmware/dualboot-latest.bin
-            echo '{"version":"${{ github.ref_name }}"}' > website/tools/microslate/firmware/dualboot-version.json
-            git -C website add tools/microslate/firmware/dualboot-latest.bin tools/microslate/firmware/dualboot-version.json
-          fi
-
-          cd website
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tools/microslate/firmware/latest.bin tools/microslate/firmware/version.json
-          git commit -m "Update MicroSlate firmware to ${{ github.ref_name }}"
-          git push
