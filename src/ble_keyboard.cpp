@@ -1,6 +1,7 @@
 #include "ble_keyboard.h"
 #include "input_handler.h"
 #include "sd_backup.h"
+#include "i18n.h"
 
 #include <NimBLEDevice.h>
 #include <Preferences.h>
@@ -25,6 +26,8 @@ static bool connectToKeyboard = false;
 static std::string keyboardAddress = "";
 static uint8_t keyboardAddressType = 0;
 static uint8_t lastReport[8] = {0};
+// Right Alt / Right GUI held alone, waiting to see if it is a 한/영 tap. Reset with lastReport.
+static uint8_t tapMod = 0;
 static uint8_t inputReportId = 0;   // Non-zero if keyboard prefixes reports with a report ID
 
 // NVS storage for persistent pairing
@@ -181,6 +184,32 @@ static void onKeyboardNotify(NimBLERemoteCharacteristic* pRemChar,
     }
   }
 
+  // A lone tap of Right Alt or Right GUI becomes HID_KEY_RIGHT_MOD_TAP (한/영).
+  // Any other key or modifier during the hold cancels it, so AltGr chords and
+  // Cmd shortcuts are unaffected.
+  {
+    static constexpr uint8_t RIGHT_TAP_MODS = 0x40 | 0x80;  // Right Alt, Right GUI
+    const uint8_t prevMods = lastReport[0];
+    bool anyKey = false;
+    for (int i = 2; i < 8; i++) anyKey |= (newReport[i] != 0);
+
+    const uint8_t pressedMods = modifiers & ~prevMods;
+    if (pressedMods != 0) {
+      // Arm only when a single right Alt/GUI goes down with nothing else held.
+      const bool lone = (modifiers == pressedMods) && !anyKey && (pressedMods & RIGHT_TAP_MODS) == pressedMods &&
+                        (pressedMods == 0x40 || pressedMods == 0x80);
+      tapMod = lone ? pressedMods : 0;
+    } else if (anyKey) {
+      tapMod = 0;
+    } else if (tapMod != 0 && (modifiers & tapMod) == 0) {
+      if (modifiers == 0) {
+        enqueueKeyEvent(HID_KEY_RIGHT_MOD_TAP, 0, true);
+        enqueueKeyEvent(HID_KEY_RIGHT_MOD_TAP, 0, false);
+      }
+      tapMod = 0;
+    }
+  }
+
   memcpy(lastReport, newReport, 8);
 
   // Track activity for adaptive connection parameters
@@ -220,6 +249,7 @@ static class ClientCallbacks : public NimBLEClientCallbacks {
     pRemoteService = nullptr;
     authSuccess = false;
     memset(lastReport, 0, 8);
+    tapMod = 0;
     lastReconnectAttempt = millis();
     DBG_PRINTLN("[BLE] Disconnected");
   }
@@ -644,11 +674,12 @@ static void applyBleTxPower() {
 int8_t getBleTxPower() { return kTxPowerSteps[g_txPowerIdx]; }
 
 const char* getBleTxPowerLabel() {
-  static char buf[20];
-  const char* tag = "";
-  if (g_txPowerIdx == 0) tag = " (Battery)";
-  else if (g_txPowerIdx == kTxPowerStepCount - 1) tag = " (Max)";
-  snprintf(buf, sizeof(buf), "%+d dBm%s", (int)kTxPowerSteps[g_txPowerIdx], tag);
+  static char buf[32];
+  const char* tag = nullptr;
+  if (g_txPowerIdx == 0) tag = tr(StrId::TX_BATTERY);
+  else if (g_txPowerIdx == kTxPowerStepCount - 1) tag = tr(StrId::TX_MAX);
+  if (tag) snprintf(buf, sizeof(buf), "%+d dBm (%s)", (int)kTxPowerSteps[g_txPowerIdx], tag);
+  else     snprintf(buf, sizeof(buf), "%+d dBm", (int)kTxPowerSteps[g_txPowerIdx]);
   return buf;
 }
 
@@ -925,6 +956,7 @@ void disconnectCurrentDevice() {
   pInputReportChar = nullptr;
   pRemoteService = nullptr;
   memset(lastReport, 0, 8);
+  tapMod = 0;
   lastReconnectAttempt = millis();
   keyboardAddress = "";
 }

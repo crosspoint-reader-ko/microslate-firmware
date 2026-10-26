@@ -16,6 +16,10 @@ void editorInsertChar(char c);
 void editorInsertText(const char* text);
 void editorDeleteChar();     // Backspace
 void editorDeleteForward();  // Delete key
+// Replace the character before the cursor (if `removePrevChar`) with `text`, in
+// one step. Used by the Hangul composer to swap the syllable being typed.
+// Returns false (and changes nothing) when the result would not fit.
+bool editorReplaceBeforeCursor(bool removePrevChar, const char* text);
 
 // Cursor movement. extend=true keeps an anchor so the range between the anchor
 // and the cursor becomes the selection (Shift+arrow). extend=false collapses an
@@ -50,6 +54,9 @@ void editorClearParagraphBreak();
 
 // Line/viewport management
 void editorSetCharsPerLine(int cpl);
+// Wrap by pixel width instead: `advance` returns a code point's advance in the
+// editor font, `fontKey` identifies that font so a font change rewraps.
+void editorSetWrapWidth(int widthPx, int fontKey, int (*advance)(uint32_t cp));
 void editorSetVisibleLines(int n);   // Tell editor how many lines are visible on screen
 int editorGetStoredVisibleLines();   // Get the last set visible lines count
 void editorRecalculateLines();

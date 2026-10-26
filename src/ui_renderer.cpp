@@ -5,6 +5,7 @@
 #include "ble_keyboard.h"
 #include "wifi_sync.h"
 #include "keyboard_layout.h"
+#include "i18n.h"
 
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
@@ -36,23 +37,36 @@ uint32_t getScanAgeMs();
 #include <builtinFonts/notosans_12_bold.h>
 #include <builtinFonts/ubuntu_10_regular.h>
 #include <builtinFonts/ubuntu_10_bold.h>
+#include <builtinFonts/ridibatang_12_regular.h>
+#include <builtinFonts/ridibatang_14_regular.h>
+#include <builtinFonts/ridibatang_16_regular.h>
+
+#include "hangul_ime.h"
 
 // Font objects (file-scoped)
+static EpdFont rb16(&ridibatang_16_regular);
+static EpdFont rb14(&ridibatang_14_regular);
+static EpdFont rb12(&ridibatang_12_regular);
+static EpdFontFamily rb16Family(&rb16);
+static EpdFontFamily rb14Family(&rb14);
+static EpdFontFamily rb12Family(&rb12);
+
+// UI fonts take Hangul from RIDIBatang of the nearest size.
 static EpdFont ns16Regular(&notosans_16_regular);
 static EpdFont ns16Bold(&notosans_16_bold);
-static EpdFontFamily ns16Family(&ns16Regular, &ns16Bold);
+static EpdFontFamily ns16Family(&ns16Regular, &ns16Bold, nullptr, nullptr, &rb16);
 
 static EpdFont ns14Regular(&notosans_14_regular);
 static EpdFont ns14Bold(&notosans_14_bold);
-static EpdFontFamily ns14Family(&ns14Regular, &ns14Bold);
+static EpdFontFamily ns14Family(&ns14Regular, &ns14Bold, nullptr, nullptr, &rb14);
 
 static EpdFont ns12Regular(&notosans_12_regular);
 static EpdFont ns12Bold(&notosans_12_bold);
-static EpdFontFamily ns12Family(&ns12Regular, &ns12Bold);
+static EpdFontFamily ns12Family(&ns12Regular, &ns12Bold, nullptr, nullptr, &rb12);
 
 static EpdFont u10Regular(&ubuntu_10_regular);
 static EpdFont u10Bold(&ubuntu_10_bold);
-static EpdFontFamily u10Family(&u10Regular, &u10Bold);
+static EpdFontFamily u10Family(&u10Regular, &u10Bold, nullptr, nullptr, &rb12);
 
 // OTA app detection (defined in main.cpp)
 extern OtaAppEntry otaApps[];
@@ -79,6 +93,15 @@ void rendererSetup(GfxRenderer& renderer) {
   renderer.insertFont(FONT_BODY, ns14Family);
   renderer.insertFont(FONT_UI, ns12Family);
   renderer.insertFont(FONT_SMALL, u10Family);
+  renderer.insertFont(FONT_EDITOR_SMALL, rb12Family);
+  renderer.insertFont(FONT_EDITOR_MEDIUM, rb14Family);
+  renderer.insertFont(FONT_EDITOR_LARGE, rb16Family);
+}
+
+// RIDIBatang's own line height is 1.0 em, too tight for Hangul; the editor
+// adds 40% leading and centres the text in the taller line.
+static int editorLineHeight(GfxRenderer& renderer) {
+  return renderer.getLineHeight(editorFontId(fontSize)) * 7 / 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,10 +185,10 @@ static void drawBattery(GfxRenderer& renderer, HalGPIO& gpio) {
 static void drawBleStatus(GfxRenderer& renderer, int x, int y) {
   const char* status = "";
   switch (getConnectionState()) {
-    case BLEState::CONNECTED:    status = "KB Connected"; break;
-    case BLEState::SCANNING:     status = "Scanning..."; break;
-    case BLEState::CONNECTING:   status = "Connecting..."; break;
-    case BLEState::DISCONNECTED: status = "KB Disconnected"; break;
+    case BLEState::CONNECTED:    status = tr(StrId::BLE_KB_CONNECTED); break;
+    case BLEState::SCANNING:     status = tr(StrId::SCANNING); break;
+    case BLEState::CONNECTING:   status = tr(StrId::CONNECTING); break;
+    case BLEState::DISCONNECTED: status = tr(StrId::BLE_KB_DISCONNECTED); break;
   }
   drawClippedText(renderer, FONT_SMALL, x, y, status, 0, !darkMode);
 }
@@ -186,7 +209,8 @@ void drawMainMenu(GfxRenderer& renderer, HalGPIO& gpio) {
   renderer.drawCenteredText(FONT_BODY, 30, "MicroSlate", tc, EpdFontFamily::BOLD);
 
   // Menu items (base + dynamically detected OTA apps)
-  static const char* baseMenuItems[] = {"Browse Files", "New Note", "Settings", "Sync"};
+  const char* baseMenuItems[] = {tr(StrId::MENU_BROWSE), tr(StrId::MENU_NEW_NOTE),
+                                 tr(StrId::MENU_SETTINGS), tr(StrId::MENU_SYNC)};
   int menuCount = 4 + otaAppCount;
   for (int i = 0; i < menuCount; i++) {
     int yPos = 90 + (i * 45);
@@ -203,7 +227,7 @@ void drawMainMenu(GfxRenderer& renderer, HalGPIO& gpio) {
   constexpr int bm = 60;
   if (sh > bm + 40) {
     clippedLine(renderer, 10, sh - bm, sw - 10, sh - bm, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, sh - bm + 12, "Arrows: Navigate  Enter: Select", 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, sh - bm + 12, tr(StrId::HINT_MAIN), 0, tc);
     drawBleStatus(renderer, 20, sh - bm + 28);
   }
   drawBattery(renderer, gpio);
@@ -220,7 +244,7 @@ void drawFileBrowser(GfxRenderer& renderer, HalGPIO& gpio) {
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
   // Header
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Notes", 0, tc, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_NOTES), 0, tc, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
@@ -235,8 +259,8 @@ void drawFileBrowser(GfxRenderer& renderer, HalGPIO& gpio) {
   }
 
   if (fc == 0) {
-    drawClippedText(renderer, FONT_UI, 20, listTop + 14, "No notes yet.", 0, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, listTop + 36, "Press Ctrl+N to create one.", 0, tc);
+    drawClippedText(renderer, FONT_UI, 20, listTop + 14, tr(StrId::NO_NOTES), 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, listTop + 36, tr(StrId::HINT_CREATE_NOTE), 0, tc);
   }
 
   FileInfo* files = getFileList();
@@ -254,10 +278,10 @@ void drawFileBrowser(GfxRenderer& renderer, HalGPIO& gpio) {
   // Footer
   clippedLine(renderer, 5, sh - footerH - 2, sw - 5, sh - footerH - 2, tc);
   if (deleteConfirmPending && fc > 0) {
-    drawClippedText(renderer, FONT_SMALL, 10, sh - footerH + 4, "Delete? Enter:Yes  Esc:No", 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 10, sh - footerH + 4, tr(StrId::DELETE_CONFIRM), 0, tc);
   } else {
     drawClippedText(renderer, FONT_SMALL, 10, sh - footerH + 4,
-                    "Ctrl+N:Title  Ctrl+D:Delete", 0, tc);
+                    tr(StrId::HINT_BROWSER), 0, tc);
   }
 
   renderer.beginRefresh(HalDisplay::FAST_REFRESH);
@@ -284,9 +308,10 @@ static void drawEditorLine(GfxRenderer& renderer, int lineIdx, int x, int yPos,
   lineBuf[copyLen] = '\0';
 
   int fontId = editorFontId(fontSize);
+  const int textY = yPos + (lineHeight - renderer.getLineHeight(fontId)) / 2;
 
   // Draw the line normally first.
-  drawClippedText(renderer, fontId, x, yPos, lineBuf, maxW, tc);
+  drawClippedText(renderer, fontId, x, textY, lineBuf, maxW, tc);
 
   // Overlay the selection on this line as inverse video, if any overlaps it.
   int selLo, selHi;
@@ -307,7 +332,7 @@ static void drawEditorLine(GfxRenderer& renderer, int lineIdx, int x, int yPos,
       // Solid block in the text colour, then the selected text in the background
       // colour on top → inverse video.
       clippedFillRect(renderer, xA, yPos, selW, lineHeight, tc);
-      drawClippedText(renderer, fontId, xA, yPos, sel, maxW - (xA - x), !tc);
+      drawClippedText(renderer, fontId, xA, textY, sel, maxW - (xA - x), !tc);
     }
   }
 }
@@ -336,6 +361,17 @@ static void drawEditorCursor(GfxRenderer& renderer, int cursorY, int lineHeight,
 
   if (cursorX >= 0 && cursorX + cursorW <= sw && cursorY >= 0 && cursorY + lineHeight <= renderer.getScreenHeight()) {
     renderer.fillRect(cursorX, cursorY, cursorW, lineHeight, tc);
+  }
+
+  // Underline the Hangul syllable still being composed (it sits just before the cursor).
+  if (hangulIsComposing() && !editorFindMode && prefixLen > 0) {
+    int lastStart = prefixLen - 1;
+    while (lastStart > 0 && (static_cast<unsigned char>(prefix[lastStart]) & 0xC0) == 0x80) lastStart--;
+    const int preeditX = cursorX - renderer.getTextAdvanceX(editorFontId(fontSize), prefix + lastStart);
+    const int underlineY = cursorY + lineHeight - 3;
+    if (preeditX >= 0 && cursorX <= sw && underlineY + 2 <= renderer.getScreenHeight()) {
+      renderer.fillRect(preeditX, underlineY, cursorX - preeditX, 2, tc);
+    }
   }
 }
 
@@ -383,9 +419,9 @@ static int drawEditorHeader(GfxRenderer& renderer, HalGPIO& gpio, int sw, bool t
   int titleMaxW = layoutIndX - 10;
   if (showWordCount) {
     int wc = editorGetWordCount();
-    char wcBuf[24];
-    if (wc == 1) snprintf(wcBuf, sizeof(wcBuf), "1 word");
-    else         snprintf(wcBuf, sizeof(wcBuf), "%d words", wc);
+    char wcBuf[32];
+    if (wc == 1) snprintf(wcBuf, sizeof(wcBuf), "%s", tr(StrId::WORD_ONE));
+    else         snprintf(wcBuf, sizeof(wcBuf), tr(StrId::WORDS_FMT), wc);
     int wcW = renderer.getTextAdvanceX(FONT_SMALL, wcBuf);
     int wcX = layoutIndX - 8 - wcW;
     if (wcX > 10) {
@@ -416,9 +452,9 @@ static void drawFindBar(GfxRenderer& renderer, int sw, int sh, bool tc) {
   clippedFillRect(renderer, 0, barY, sw, barH, !tc);   // clear to background
   clippedLine(renderer, 0, barY, sw, barY, tc);        // top divider
   char line[72];
-  snprintf(line, sizeof(line), "Find: %s", findBuffer);
+  snprintf(line, sizeof(line), tr(StrId::FIND_FMT), findBuffer);
   drawClippedText(renderer, FONT_UI, 8, barY + 5, line, sw - 100, tc);
-  drawRightText(renderer, FONT_SMALL, sw - 8, barY + 7, "Enter:Next Esc:Close", tc);
+  drawRightText(renderer, FONT_SMALL, sw - 8, barY + 7, tr(StrId::HINT_FIND), tc);
 }
 
 void drawTextEditor(GfxRenderer& renderer, HalGPIO& gpio) {
@@ -429,7 +465,7 @@ void drawTextEditor(GfxRenderer& renderer, HalGPIO& gpio) {
 
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
-  int lineHeight = renderer.getLineHeight(editorFontId(fontSize));
+  int lineHeight = editorLineHeight(renderer);
   if (lineHeight <= 0) lineHeight = 20;
   int totalLines = editorGetLineCount();
   int curLine = editorGetCursorLine();
@@ -469,8 +505,8 @@ void drawTextEditor(GfxRenderer& renderer, HalGPIO& gpio) {
     int totalPages = (totalLines + tempLinesPerPage - 1) / tempLinesPerPage;
     if (totalPages < 1) totalPages = 1;
 
-    char pageStr[16];
-    snprintf(pageStr, sizeof(pageStr), "Pg %d/%d", currentPage + 1, totalPages);
+    char pageStr[24];
+    snprintf(pageStr, sizeof(pageStr), tr(StrId::PAGE_FMT), currentPage + 1, totalPages);
     int textAreaTop = drawEditorHeader(renderer, gpio, sw, tc, pageStr);
 
     int textAreaBottom = sh - 5;
@@ -536,11 +572,11 @@ void drawRenameScreen(GfxRenderer& renderer, HalGPIO& gpio) {
 
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Edit Title", 0, tc, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_EDIT), 0, tc, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
-  drawClippedText(renderer, FONT_SMALL, 20, 42, "Note title:", 0, tc);
+  drawClippedText(renderer, FONT_SMALL, 20, 42, tr(StrId::NOTE_TITLE_LABEL), 0, tc);
   // Auto-size the input box to the text line height with even padding, so the
   // text and caret are vertically centred and never touch the border.
   int lineH = renderer.getLineHeight(FONT_UI);
@@ -558,11 +594,11 @@ void drawRenameScreen(GfxRenderer& renderer, HalGPIO& gpio) {
     renderer.fillRect(cursorX, textY, 2, lineH, tc);
 
   drawClippedText(renderer, FONT_SMALL, 20, boxY + boxH + 8,
-                  "File title input uses US QWERTY", sw - 40, tc);
+                  tr(StrId::TITLE_QWERTY_NOTE), sw - 40, tc);
 
   // Footer
   clippedLine(renderer, 5, sh - 36, sw - 5, sh - 36, tc);
-  drawClippedText(renderer, FONT_SMALL, 10, sh - 30, "Enter: Confirm   Esc: Cancel", 0, tc);
+  drawClippedText(renderer, FONT_SMALL, 10, sh - 30, tr(StrId::HINT_CONFIRM), 0, tc);
 
   renderer.beginRefresh(HalDisplay::FAST_REFRESH);
 }
@@ -574,15 +610,17 @@ void drawSettingsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
 
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Settings", 0, !darkMode, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_SETTINGS), 0, !darkMode, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, !darkMode);
 
-  // Setting items: Orientation, Dark Mode, Writing Mode, Font Size, Layout, BLE Power, Bluetooth, Paired Keyboards
-  static const char* labels[] = {
-    "Orientation", "Dark Mode", "Writing Mode", "Font Size", "Keyboard Layout", "BLE Power", "Bluetooth", "Paired Keyboards"
+  // Setting items: Orientation, Dark Mode, Writing Mode, Font Size, Layout, BLE Power, Bluetooth, Paired Keyboards, Language
+  const char* labels[] = {
+    tr(StrId::SET_ORIENTATION), tr(StrId::SET_DARK_MODE), tr(StrId::SET_WRITING_MODE), tr(StrId::SET_FONT_SIZE),
+    tr(StrId::SET_KB_LAYOUT), tr(StrId::SET_BLE_POWER), tr(StrId::SET_BLUETOOTH), tr(StrId::SET_PAIRED),
+    tr(StrId::SET_LANGUAGE)
   };
-  const int SETTINGS_COUNT = 8;
+  const int SETTINGS_COUNT = 9;
 
   // Compute line height to fit all items — use smaller spacing if needed
   int lineH = 38;
@@ -604,27 +642,27 @@ void drawSettingsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
     }
 
     // Value on the right
-    char val[32] = "";
+    char val[40] = "";
     if (i == 0) {
       switch (currentOrientation) {
-        case Orientation::PORTRAIT:      strcpy(val, "Portrait"); break;
-        case Orientation::LANDSCAPE_CW:  strcpy(val, "Landscape CW"); break;
-        case Orientation::PORTRAIT_INV:  strcpy(val, "Inverted"); break;
-        case Orientation::LANDSCAPE_CCW: strcpy(val, "Landscape CCW"); break;
+        case Orientation::PORTRAIT:      strcpy(val, tr(StrId::ORIENT_PORTRAIT)); break;
+        case Orientation::LANDSCAPE_CW:  strcpy(val, tr(StrId::ORIENT_LAND_CW)); break;
+        case Orientation::PORTRAIT_INV:  strcpy(val, tr(StrId::ORIENT_INVERTED)); break;
+        case Orientation::LANDSCAPE_CCW: strcpy(val, tr(StrId::ORIENT_LAND_CCW)); break;
       }
     } else if (i == 1) {
-      strcpy(val, darkMode ? "Dark" : "Light");
+      strcpy(val, tr(darkMode ? StrId::DARK : StrId::LIGHT));
     } else if (i == 2) {
       switch (writingMode) {
-        case WritingMode::NORMAL:     strcpy(val, "Normal"); break;
-        case WritingMode::TYPEWRITER: strcpy(val, "Typewriter"); break;
-        case WritingMode::PAGINATION: strcpy(val, "Pagination"); break;
+        case WritingMode::NORMAL:     strcpy(val, tr(StrId::MODE_NORMAL)); break;
+        case WritingMode::TYPEWRITER: strcpy(val, tr(StrId::MODE_TYPEWRITER)); break;
+        case WritingMode::PAGINATION: strcpy(val, tr(StrId::MODE_PAGINATION)); break;
       }
     } else if (i == 3) {
       switch (fontSize) {
-        case FontSize::SMALL:  strcpy(val, "Small"); break;
-        case FontSize::MEDIUM: strcpy(val, "Medium"); break;
-        default:               strcpy(val, "Large"); break;
+        case FontSize::SMALL:  strcpy(val, tr(StrId::SIZE_SMALL)); break;
+        case FontSize::MEDIUM: strcpy(val, tr(StrId::SIZE_MEDIUM)); break;
+        default:               strcpy(val, tr(StrId::SIZE_LARGE)); break;
       }
     } else if (i == 4) {
       strncpy(val, keyboardLayoutName(currentKeyboardLayout), sizeof(val) - 1);
@@ -634,9 +672,11 @@ void drawSettingsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
       val[sizeof(val) - 1] = '\0';
     } else if (i == 7) {
       int kbCount = getPairedKeyboardCount();
-      if (kbCount == 0) strcpy(val, "None");
-      else if (kbCount == 1) strcpy(val, "1 keyboard");
-      else snprintf(val, sizeof(val), "%d keyboards", kbCount);
+      if (kbCount == 0) strcpy(val, tr(StrId::NONE));
+      else if (kbCount == 1) strcpy(val, tr(StrId::ONE_KEYBOARD));
+      else snprintf(val, sizeof(val), tr(StrId::KEYBOARDS_COUNT_FMT), kbCount);
+    } else if (i == 8) {
+      strcpy(val, languageName(getLanguage()));
     }
 
     if (val[0] != '\0') {
@@ -649,7 +689,7 @@ void drawSettingsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
   if (sh > bm + 30) {
     clippedLine(renderer, 10, sh - bm, sw - 10, sh - bm, !darkMode);
     drawClippedText(renderer, FONT_SMALL, 20, sh - bm + 12,
-                    "Arrows:Navigate  Enter:Change  Esc:Back", 0, !darkMode);
+                    tr(StrId::HINT_SETTINGS), 0, !darkMode);
   }
 
   renderer.beginRefresh(HalDisplay::FAST_REFRESH);
@@ -665,17 +705,17 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
   // Header
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Bluetooth Devices", 0, tc, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_BT), 0, tc, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
   // Connection status
   const char* status = "";
   switch (getConnectionState()) {
-    case BLEState::CONNECTED:    status = "Connected to keyboard"; break;
-    case BLEState::SCANNING:     status = "Scanning for devices..."; break;
-    case BLEState::CONNECTING:   status = "Connecting..."; break;
-    case BLEState::DISCONNECTED: status = "Not connected"; break;
+    case BLEState::CONNECTED:    status = tr(StrId::BT_CONNECTED); break;
+    case BLEState::SCANNING:     status = tr(StrId::BT_SCANNING); break;
+    case BLEState::CONNECTING:   status = tr(StrId::CONNECTING); break;
+    case BLEState::DISCONNECTED: status = tr(StrId::BT_NOT_CONNECTED); break;
   }
   drawClippedText(renderer, FONT_SMALL, 10, 45, status, sw / 2 - 10, tc);
 
@@ -683,7 +723,7 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
   std::string storedAddr, storedName;
   if (getStoredDevice(storedAddr, storedName)) {
     char pairedStr[64];
-    snprintf(pairedStr, sizeof(pairedStr), "Paired: %s", storedName.c_str());
+    snprintf(pairedStr, sizeof(pairedStr), tr(StrId::PAIRED_FMT), storedName.c_str());
     drawClippedText(renderer, FONT_SMALL, sw / 2, 45, pairedStr, sw / 2 - 10, tc);
   }
 
@@ -691,11 +731,11 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
   uint32_t passkey = getCurrentPasskey();
   if (passkey > 0) {
     char passkeyStr[32];
-    drawClippedText(renderer, FONT_UI, 20, 100, "PAIRING CODE:", 0, tc, EpdFontFamily::BOLD);
+    drawClippedText(renderer, FONT_UI, 20, 100, tr(StrId::PAIRING_CODE), 0, tc, EpdFontFamily::BOLD);
     snprintf(passkeyStr, sizeof(passkeyStr), "%06lu", passkey);
     drawClippedText(renderer, FONT_BODY, 20, 130, passkeyStr, 0, tc, EpdFontFamily::BOLD);
-    drawClippedText(renderer, FONT_SMALL, 20, 160, "Type this code on your keyboard", 0, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, 180, "then press Enter", 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, 160, tr(StrId::TYPE_CODE_1), 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, 180, tr(StrId::TYPE_CODE_2), 0, tc);
   } else if (isDeviceScanning()) {
     static uint8_t dotPhase = 0;
     static uint32_t lastAnimMs = 0;
@@ -706,11 +746,11 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
     std::string dots(dotPhase, '.');
     char scanningStr[64];
     int deviceCount = getDiscoveredDeviceCount();
-    snprintf(scanningStr, sizeof(scanningStr), "Searching for devices%s", dots.c_str());
+    snprintf(scanningStr, sizeof(scanningStr), tr(StrId::SEARCHING_FMT), dots.c_str());
     drawClippedText(renderer, FONT_SMALL, 10, 68, scanningStr, sw / 2 - 10, tc);
 
     char foundStr[32];
-    snprintf(foundStr, sizeof(foundStr), "Found: %d", deviceCount);
+    snprintf(foundStr, sizeof(foundStr), tr(StrId::FOUND_FMT), deviceCount);
     drawClippedText(renderer, FONT_SMALL, sw / 2, 68, foundStr, sw / 2 - 10, tc);
   }
 
@@ -728,9 +768,9 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
     if (!isDeviceScanning()) {
       char headerStr[64];
       if (btShowAllDevices || kbd == 0)
-        snprintf(headerStr, sizeof(headerStr), "Devices: %d", total);
+        snprintf(headerStr, sizeof(headerStr), tr(StrId::DEVICES_FMT), total);
       else
-        snprintf(headerStr, sizeof(headerStr), "Keyboards: %d", visCount);
+        snprintf(headerStr, sizeof(headerStr), tr(StrId::KEYBOARDS_FMT), visCount);
       drawClippedText(renderer, FONT_SMALL, 10, 68, headerStr, 0, tc, EpdFontFamily::BOLD);
     }
 
@@ -770,9 +810,9 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
         // The "Show other devices" / "Show keyboards only" toggle row
         char toggleStr[40];
         if (btShowAllDevices)
-          snprintf(toggleStr, sizeof(toggleStr), "Show keyboards only");
+          snprintf(toggleStr, sizeof(toggleStr), "%s", tr(StrId::SHOW_KB_ONLY));
         else
-          snprintf(toggleStr, sizeof(toggleStr), "Show other devices (%d)", total - kbd);
+          snprintf(toggleStr, sizeof(toggleStr), tr(StrId::SHOW_OTHER_FMT), total - kbd);
         if (isSel) {
           clippedFillRect(renderer, 5, yPos - 5, sw - 10, 25, tc);
           drawClippedText(renderer, FONT_UI, 15, yPos, toggleStr, sw - 30, !tc);
@@ -787,22 +827,22 @@ void drawBluetoothSettings(GfxRenderer& renderer, HalGPIO& gpio) {
       char navHint[32];
       int pageNum = (sel / maxToShow) + 1;
       int totalPages = (itemCount + maxToShow - 1) / maxToShow;
-      snprintf(navHint, sizeof(navHint), "Page %d/%d", pageNum, totalPages);
+      snprintf(navHint, sizeof(navHint), tr(StrId::PAGE_NUM_FMT), pageNum, totalPages);
       int navY = 98 + (itemsToShow * 30);
       if (navY < sh - 100)
         drawClippedText(renderer, FONT_SMALL, 15, navY, navHint, 0, tc);
     }
   } else {
-    drawClippedText(renderer, FONT_UI, 20, 80, "No devices found", 0, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, 100, "Press Enter to scan for devices", 0, tc);
+    drawClippedText(renderer, FONT_UI, 20, 80, tr(StrId::NO_DEVICES), 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, 100, tr(StrId::HINT_SCAN_ENTER), 0, tc);
   }
 
   // Footer
   constexpr int bm = 62;
   if (sh > bm + 30) {
     clippedLine(renderer, 10, sh - bm, sw - 10, sh - bm, tc);
-    drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 10, "Enter:Connect  Right:Scan", 0, tc);
-    drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, "Left:Disconnect  Esc:Back", 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 10, tr(StrId::HINT_BT_1), 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, tr(StrId::HINT_BT_2), 0, tc);
   }
 
   renderer.beginRefresh(HalDisplay::FAST_REFRESH);
@@ -816,14 +856,14 @@ void drawPairedKeyboardsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
 
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Paired Keyboards", 0, tc, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_PAIRED), 0, tc, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
   int count = getPairedKeyboardCount();
   if (count == 0) {
-    drawClippedText(renderer, FONT_UI, 20, 60, "No paired keyboards", 0, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, 85, "Go to Bluetooth to scan and connect", 0, tc);
+    drawClippedText(renderer, FONT_UI, 20, 60, tr(StrId::NO_PAIRED), 0, tc);
+    drawClippedText(renderer, FONT_SMALL, 20, 85, tr(StrId::HINT_GO_BT), 0, tc);
   } else {
     std::string currentAddr = getCurrentDeviceAddress();
     int lineH = 38;
@@ -845,9 +885,9 @@ void drawPairedKeyboardsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
       }
 
       if (active) {
-        drawRightText(renderer, FONT_SMALL, sw - 10, yPos + 2, "active", sel ? !tc : tc);
+        drawRightText(renderer, FONT_SMALL, sw - 10, yPos + 2, tr(StrId::TAG_ACTIVE), sel ? !tc : tc);
       } else if (!active && i == getLastUsedKeyboardIndex() && currentAddr.empty()) {
-        drawRightText(renderer, FONT_SMALL, sw - 10, yPos + 2, "last", sel ? !tc : tc);
+        drawRightText(renderer, FONT_SMALL, sw - 10, yPos + 2, tr(StrId::TAG_LAST), sel ? !tc : tc);
       }
     }
   }
@@ -859,12 +899,12 @@ void drawPairedKeyboardsMenu(GfxRenderer& renderer, HalGPIO& gpio) {
       std::string addr, name; uint8_t addrType;
       getPairedKeyboard(pairedKeyboardSelection, addr, name, addrType);
       char prompt[64];
-      snprintf(prompt, sizeof(prompt), "Forget \"%s\"?", name.c_str());
+      snprintf(prompt, sizeof(prompt), tr(StrId::FORGET_FMT), name.c_str());
       drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 10, prompt, sw - 20, tc, EpdFontFamily::BOLD);
-      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, "Enter:Yes   Esc:No", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, tr(StrId::HINT_YES_NO), 0, tc);
     } else {
-      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 10, "Up/Down:Move   Enter:Connect", 0, tc);
-      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, "Right:Forget   Esc:Back", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 10, tr(StrId::HINT_PAIRED_1), 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 32, tr(StrId::HINT_PAIRED_2), 0, tc);
     }
   }
 
@@ -895,7 +935,7 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
   if (darkMode) clippedFillRect(renderer, 0, 0, sw, sh, true);
 
   // Header
-  drawClippedText(renderer, FONT_SMALL, 10, 5, "Sync", 0, tc, EpdFontFamily::BOLD);
+  drawClippedText(renderer, FONT_SMALL, 10, 5, tr(StrId::TITLE_SYNC), 0, tc, EpdFontFamily::BOLD);
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
@@ -903,7 +943,7 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
 
   switch (state) {
     case SyncState::SCANNING: {
-      drawClippedText(renderer, FONT_UI, 20, 80, "Scanning for networks...", sw - 40, tc);
+      drawClippedText(renderer, FONT_UI, 20, 80, tr(StrId::SCANNING_NETWORKS), sw - 40, tc);
       break;
     }
 
@@ -913,10 +953,10 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
 
       if (nc == 0) {
         const char* st = getSyncStatusText();
-        drawClippedText(renderer, FONT_UI, 20, 60, st[0] ? st : "No networks found", sw - 40, tc);
-        drawClippedText(renderer, FONT_SMALL, 20, 90, "Enter: Rescan  Esc: Back", 0, tc);
+        drawClippedText(renderer, FONT_UI, 20, 60, st[0] ? st : tr(StrId::NO_NETWORKS), sw - 40, tc);
+        drawClippedText(renderer, FONT_SMALL, 20, 90, tr(StrId::HINT_RESCAN), 0, tc);
       } else {
-        drawClippedText(renderer, FONT_SMALL, 10, 38, "Select network:", 0, tc);
+        drawClippedText(renderer, FONT_SMALL, 10, 38, tr(StrId::SELECT_NETWORK), 0, tc);
 
         int lineH = 28;
         int listTop = 56;
@@ -953,14 +993,14 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
       constexpr int bm = 28;
       clippedLine(renderer, 10, sh - bm - 2, sw - 10, sh - bm - 2, tc);
       drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 4,
-                      "*=encrypted +=saved  Enter:Select  Esc:Back", 0, tc);
+                      tr(StrId::HINT_NETLIST), 0, tc);
       break;
     }
 
     case SyncState::PASSWORD_ENTRY: {
       int sel = getSelectedNetwork();
-      char heading[48];
-      snprintf(heading, sizeof(heading), "Password for %s", getNetworkSSID(sel));
+      char heading[64];
+      snprintf(heading, sizeof(heading), tr(StrId::PASSWORD_FOR_FMT), getNetworkSSID(sel));
       drawClippedText(renderer, FONT_SMALL, 20, 42, heading, sw - 40, tc);
 
       // Password field box
@@ -980,15 +1020,15 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
       if (cursorX + cursorW < sw)
         renderer.fillRect(cursorX, 66, cursorW, 20, tc);
 
-      drawClippedText(renderer, FONT_SMALL, 20, 104, "Password input uses US QWERTY", sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 122, "Enter: Connect   Esc: Cancel", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 104, tr(StrId::PASSWORD_QWERTY), sw - 40, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 122, tr(StrId::HINT_CONNECT), 0, tc);
       break;
     }
 
     case SyncState::CONNECTING: {
       const char* st = getSyncStatusText();
       drawClippedText(renderer, FONT_UI, 20, 80, st, sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 110, "Esc: Cancel", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 110, tr(StrId::HINT_CANCEL), 0, tc);
       break;
     }
 
@@ -1000,7 +1040,7 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
       bool pcConn = isPcConnected();
 
       // Build the stage list. Static so string pointers remain valid after this scope.
-      static char fileStageText[MAX_FILES][16];
+      static char fileStageText[MAX_FILES][32];
       static struct { const char* text; bool done; } stages[MAX_FILES + 3];
       int numStages = 0;
 
@@ -1008,15 +1048,15 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
         if (numStages < MAX_FILES + 3) stages[numStages++] = { text, done };
       };
 
-      push("Connected to WiFi", true);
-      push("PC connected",      pcConn);
+      push(tr(StrId::STAGE_WIFI), true);
+      push(tr(StrId::STAGE_PC),   pcConn);
 
       if (pcConn) {
         for (int i = 0; i < sent && i < MAX_FILES; i++) {
-          snprintf(fileStageText[i], sizeof(fileStageText[i]), "File %d sent", i + 1);
+          snprintf(fileStageText[i], sizeof(fileStageText[i]), tr(StrId::STAGE_FILE_FMT), i + 1);
           push(fileStageText[i], true);
         }
-        push("Sync complete", false);
+        push(tr(StrId::STAGE_SYNC_DONE), false);
       }
 
       // Display with auto-scroll: keep last [x] + next [-] in view
@@ -1038,7 +1078,7 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
 
       for (int i = startIdx; i < numStages && (i - startIdx) < maxVisible; i++) {
         int yPos = listTop + (i - startIdx) * lineH;
-        char line[52];
+        char line[64];
         snprintf(line, sizeof(line), "%s %s",
                  stages[i].done ? "[x]" : "[-]", stages[i].text);
         drawClippedText(renderer, FONT_SMALL, 15, yPos, line, sw - 25, tc);
@@ -1047,39 +1087,39 @@ void drawSyncScreen(GfxRenderer& renderer, HalGPIO& gpio) {
       // Footer
       constexpr int bm = 28;
       clippedLine(renderer, 10, sh - bm - 2, sw - 10, sh - bm - 2, tc);
-      char countStr[32];
-      snprintf(countStr, sizeof(countStr), "Sent: %d   Esc: Cancel", sent);
+      char countStr[48];
+      snprintf(countStr, sizeof(countStr), tr(StrId::SENT_CANCEL_FMT), sent);
       drawClippedText(renderer, FONT_SMALL, 10, sh - bm + 4, countStr, sw - 20, tc);
       break;
     }
 
     case SyncState::DONE: {
       const char* summary = getSyncStatusText();
-      drawClippedText(renderer, FONT_SMALL, 20, 50, "Sync Complete", 0, tc, EpdFontFamily::BOLD);
+      drawClippedText(renderer, FONT_SMALL, 20, 50, tr(StrId::SYNC_COMPLETE), 0, tc, EpdFontFamily::BOLD);
       drawClippedText(renderer, FONT_UI, 20, 85, summary, sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 125, "Returning to menu...", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 125, tr(StrId::RETURNING), 0, tc);
       break;
     }
 
     case SyncState::CONNECT_FAILED: {
-      drawClippedText(renderer, FONT_UI, 20, 80, "Connection failed", sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 110, "Enter: Retry   Esc: Back", 0, tc);
+      drawClippedText(renderer, FONT_UI, 20, 80, tr(StrId::CONN_FAILED), sw - 40, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 110, tr(StrId::HINT_RETRY), 0, tc);
       break;
     }
 
     case SyncState::SAVE_PROMPT: {
       const char* ip = getSyncStatusText();
-      drawClippedText(renderer, FONT_SMALL, 20, 50, "Connected!", 0, tc, EpdFontFamily::BOLD);
+      drawClippedText(renderer, FONT_SMALL, 20, 50, tr(StrId::CONNECTED_BANG), 0, tc, EpdFontFamily::BOLD);
       drawClippedText(renderer, FONT_UI, 20, 80, ip, sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 120, "Save password?", 0, tc, EpdFontFamily::BOLD);
-      drawClippedText(renderer, FONT_SMALL, 20, 145, "Enter/Up: Yes   Down/Esc: No", 0, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 120, tr(StrId::SAVE_PASSWORD), 0, tc, EpdFontFamily::BOLD);
+      drawClippedText(renderer, FONT_SMALL, 20, 145, tr(StrId::HINT_YES_NO_ARROWS), 0, tc);
       break;
     }
 
     case SyncState::FORGET_PROMPT: {
-      drawClippedText(renderer, FONT_UI, 20, 80, "Saved password failed", sw - 40, tc);
-      drawClippedText(renderer, FONT_SMALL, 20, 120, "Forget saved password?", 0, tc, EpdFontFamily::BOLD);
-      drawClippedText(renderer, FONT_SMALL, 20, 145, "Enter/Up: Yes   Down/Esc: No", 0, tc);
+      drawClippedText(renderer, FONT_UI, 20, 80, tr(StrId::SAVED_PW_FAILED), sw - 40, tc);
+      drawClippedText(renderer, FONT_SMALL, 20, 120, tr(StrId::FORGET_PASSWORD), 0, tc, EpdFontFamily::BOLD);
+      drawClippedText(renderer, FONT_SMALL, 20, 145, tr(StrId::HINT_YES_NO_ARROWS), 0, tc);
       break;
     }
   }

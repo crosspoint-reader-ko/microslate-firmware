@@ -31,7 +31,12 @@ static int cursorCol = 0;
 static int viewportStartLine = 0;
 static int charsPerLine = 40;
 static int storedVisibleLines = 20;  // Updated by renderer each frame
-static bool lineBreaksDirty = true;  // Only recompute line breaks when buffer/charsPerLine changes
+static bool lineBreaksDirty = true;  // Only recompute line breaks when buffer/wrap settings change
+
+// Pixel wrap (editorSetWrapWidth). When wrapAdvance is null, lines wrap by charsPerLine.
+static int wrapWidthPx = 0;
+static int wrapFontKey = 0;
+static int (*wrapAdvance)(uint32_t cp) = nullptr;
 
 // Forward declaration
 static void ensureCursorVisible(int visibleLines);
@@ -77,6 +82,71 @@ static int utf8CountChars(int start, int end) {
   return count;
 }
 
+static uint32_t utf8CodepointAt(int pos) {
+  const unsigned char* p = reinterpret_cast<const unsigned char*>(textBuffer + pos);
+  const int len = utf8CharLenAt(pos);
+  switch (len) {
+    case 2: return ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    case 3: return ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    case 4: return ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    default: return p[0];
+  }
+}
+
+static int widthOfRange(int start, int end) {
+  int w = 0;
+  for (int i = start; i < end; i = utf8NextPos(i)) w += wrapAdvance(utf8CodepointAt(i));
+  return w;
+}
+
+// Word wrap by measured glyph widths. A word that would cross the right edge
+// moves to the next line; a word wider than the line breaks between characters.
+// A space may hang past the edge (it is invisible there); only a run of spaces wraps.
+static void wrapByPixels() {
+  int lineStart = 0;
+  int x = 0;
+  int lastSpace = -1;
+  for (int i = 0; i < (int)textLength && lineCount < MAX_LINES;) {
+    if (textBuffer[i] == '\n') {
+      linePositions[lineCount++] = i + 1;
+      lineStart = i + 1;
+      x = 0;
+      lastSpace = -1;
+      i++;
+      continue;
+    }
+
+    const int charEnd = utf8NextPos(i);
+    const int w = wrapAdvance(utf8CodepointAt(i));
+    if (textBuffer[i] == ' ') {
+      // One space may hang past the edge; further spaces (a held Space bar) wrap.
+      if (x > wrapWidthPx && i > lineStart) {
+        linePositions[lineCount++] = i;
+        lineStart = i;
+        lastSpace = -1;
+        x = 0;
+        if (lineCount >= MAX_LINES) break;
+      }
+      lastSpace = i;
+      x += w;
+      i = charEnd;
+      continue;
+    }
+
+    if (x + w > wrapWidthPx && i > lineStart) {
+      const int breakPos = (lastSpace >= lineStart) ? lastSpace + 1 : i;
+      linePositions[lineCount++] = breakPos;
+      lineStart = breakPos;
+      lastSpace = -1;
+      x = widthOfRange(breakPos, i);
+      if (lineCount >= MAX_LINES) break;
+    }
+
+    x += w;
+    i = charEnd;
+  }
+}
+
 static int lineContentEnd(int lineIndex) {
   int lineStart = linePositions[lineIndex];
   int lineEnd = (lineIndex + 1 < lineCount) ? linePositions[lineIndex + 1] : (int)textLength;
@@ -108,7 +178,7 @@ static void deleteByteRange(int start, int end) {
 }
 
 // Recalculate line breaks (word wrap) and cursor position.
-// The O(textLength) line break loop only runs when the buffer or charsPerLine changed.
+// The O(textLength) line break loop only runs when the buffer or wrap settings changed.
 // Cursor line/col is always recomputed (cheap O(cursorLine) with early exit).
 void editorRecalculateLines() {
   if (lineBreaksDirty) {
@@ -116,10 +186,15 @@ void editorRecalculateLines() {
     linePositions[0] = 0;
     lineCount = 1;
 
+    if (wrapAdvance && wrapWidthPx > 0) {
+      wrapByPixels();
+      lineBreaksDirty = false;
+    }
+
     int col = 0;
     int lastSpace = -1;
 
-    for (int i = 0; i < (int)textLength && lineCount < MAX_LINES;) {
+    for (int i = 0; lineBreaksDirty && i < (int)textLength && lineCount < MAX_LINES;) {
       if (textBuffer[i] == '\n') {
         // Hard line break
         if (lineCount < MAX_LINES) {
@@ -485,6 +560,47 @@ void editorSetCharsPerLine(int cpl) {
     lineBreaksDirty = true;
   }
   editorRecalculateLines();
+}
+
+void editorSetWrapWidth(int widthPx, int fontKey, int (*advance)(uint32_t cp)) {
+  if (widthPx != wrapWidthPx || fontKey != wrapFontKey || advance != wrapAdvance) {
+    wrapWidthPx = widthPx;
+    wrapFontKey = fontKey;
+    wrapAdvance = advance;
+    lineBreaksDirty = true;
+  }
+  editorRecalculateLines();
+}
+
+bool editorReplaceBeforeCursor(bool removePrevChar, const char* text) {
+  // Typing over a selection replaces it, as editorInsertText does. (A preedit is
+  // never selected: selecting finishes the syllable first.)
+  if (editorHasSelection()) {
+    int lo, hi;
+    editorGetSelectionRange(&lo, &hi);
+    selectionAnchor = -1;
+    deleteByteRange(lo, hi);  // cursor now at lo
+    removePrevChar = false;
+  }
+  selectionAnchor = -1;
+  const size_t insertLen = text ? strlen(text) : 0;
+  int start = cursorPosition;
+  if (removePrevChar && cursorPosition > 0) start = utf8PrevPos(cursorPosition);
+  const int removed = cursorPosition - start;
+  if (textLength - removed + insertLen >= TEXT_BUFFER_SIZE) return false;
+  if (removed == 0 && insertLen == 0) return true;
+
+  memmove(textBuffer + start + insertLen, textBuffer + cursorPosition, textLength - cursorPosition);
+  if (insertLen) memcpy(textBuffer + start, text, insertLen);
+  textLength = textLength - removed + insertLen;
+  textBuffer[textLength] = '\0';
+  cursorPosition = start + (int)insertLen;
+  unsavedChanges = true;
+  lineBreaksDirty = true;
+
+  editorRecalculateLines();
+  ensureCursorVisible(storedVisibleLines);
+  return true;
 }
 
 void editorSetVisibleLines(int n) {

@@ -17,7 +17,9 @@ A dedicated writing firmware for the **Xteink X4** e-paper device. Pairs with an
 - **Clean Mode** — hides all UI chrome while editing so only your text is on screen (Ctrl+Z to toggle)
 - **Find** — Ctrl+F opens a find bar at the bottom of the editor. Enter jumps to the next match (wraps around), Esc closes it
 - **Clipboard** — select text with Shift+arrows, Shift+Home/End, or Ctrl+A, then copy, cut, and paste with Ctrl+C, Ctrl+X, and Ctrl+V
-- **Keyboard Layouts** — US QWERTY, Russian (ЙЦУКЕН), and German (QWERTZ). Choose one in Settings, or press Ctrl+K in the editor to cycle; the active layout shows in the header
+- **Keyboard Layouts** — US QWERTY, Russian (ЙЦУКЕН), German (QWERTZ), and Korean (2-set / 두벌식). Choose one in Settings, or press Ctrl+K in the editor to cycle; the active layout shows in the header
+- **Korean Input** — Hangul is composed on the device as you type (2-set layout), with Backspace undoing one jamo at a time. Toggle Korean with Shift+Space, the 한/영 key, Ctrl+Space, or a tap of Right Alt / Right Cmd. Works in the editor and the find bar
+- **Editor Font** — notes are set in RIDIBatang (리디바탕), which covers all 11,172 modern Hangul syllables. Lines wrap by measured width, so mixed Korean and Latin text fills the line
 - **Word Count** — Ctrl+W toggles a word count in the editor
 - **Newest-First Browser** — notes are sorted by when they were last saved, newest at the top. The device has no clock, so it keeps its own monotonic timestamp across reboots
 - **Dark Mode** — inverted display
@@ -114,7 +116,8 @@ When delete is pending, the footer shows `Delete? Enter:Yes  Esc:No`. Press Ente
 | Ctrl+A | Select all |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
 | Ctrl+F | Find (Enter = next match, Esc = close) |
-| Ctrl+K | Cycle keyboard layout (US QWERTY → Russian → German) |
+| Ctrl+K | Cycle keyboard layout (US QWERTY → Russian → German → Korean) |
+| Shift+Space, 한/영, Ctrl+Space, or tap Right Alt / Right Cmd | Switch between Korean and the last other layout |
 | Ctrl+W | Toggle word count |
 | Ctrl+S | Save manually |
 | Ctrl+N | Edit note title |
@@ -124,7 +127,9 @@ When delete is pending, the footer shows `Delete? Enter:Yes  Esc:No`. Press Ente
 | Ctrl+Left / Right | Jump pages (Pagination mode only) |
 | Esc / Back button | Save and return to file browser |
 
-The current writing mode is shown in the header: **[S]** Scroll, **[T]** Typewriter, **[P]** Pagination. When a non-QWERTY layout is active, its short name (RU or DE) appears in the header too.
+The current writing mode is shown in the header: **[S]** Scroll, **[T]** Typewriter, **[P]** Pagination. When a non-QWERTY layout is active, its short name (RU, DE, or 한) appears in the header too.
+
+In Korean mode the syllable being composed is underlined. Any key other than a letter or Backspace (space, punctuation, arrows, Enter) finishes it. The Right Alt / Right Cmd tap only toggles when the layout is US QWERTY or Korean, because German and Russian use Right Alt as AltGr. Note titles stay ASCII, since the filename is made from the title.
 
 Auto-save runs silently after 10 seconds of idle, every 60 seconds during continuous typing, and at paragraph breaks — Ctrl+S is only needed if you want to save immediately.
 
@@ -157,10 +162,11 @@ Navigate with all four direction buttons (or Up/Down on keyboard). Press Enter (
 | Dark Mode | Light / Dark |
 | Writing Mode | Normal, Typewriter, Pagination |
 | Font Size | Adjustable in place |
-| Keyboard Layout | US QWERTY, Russian (ЙЦУКЕН), German (QWERTZ) |
+| Keyboard Layout | US QWERTY, Russian (ЙЦУКЕН), German (QWERTZ), Korean (두벌식) |
 | BLE Power | −9 (default), −3, 0, +3, +9 dBm. Higher steps give weak or distant keyboards more signal margin, at a battery cost. Leave it at −9 unless a keyboard drops out |
 | Bluetooth | Opens Bluetooth scan to pair a new keyboard |
 | Paired Keyboards | Manage saved keyboards (connect, forget, disconnect) |
+| Language | English (default) or 한국어. Switches all menus, hints and status messages; note titles and file names are not translated. The dual-boot entry name changes to "MicroSlate (한글)" |
 
 All settings persist across reboots.
 
@@ -261,6 +267,8 @@ xteink-writer-firmware/
 │   ├── sd_backup.h       — inline SD/JSON helpers for NVS backup and restore
 │   ├── ble_keyboard.cpp  — BLE scanning, pairing, HID report handling
 │   ├── input_handler.cpp — keyboard event queue and UI state dispatch
+│   ├── hangul_ime.cpp    — Korean 2-set composer (host test in test/host/)
+│   ├── keyboard_layout.cpp — per-layout key maps
 │   ├── text_editor.cpp   — text buffer and cursor management
 │   ├── file_manager.cpp  — SD card file operations
 │   ├── ui_renderer.cpp   — screen rendering for all UI modes
@@ -311,6 +319,8 @@ MicroSlate v2.1 includes work from the community. Thank you to the people who wr
 - **[nonexistent9](https://github.com/nonexistent9)** — stability work: task watchdog, BLE reconnect hardening (keeps bonds and recovers a wedged connect task), the arduino-esp32 2.0.17 watchdog fix, and a fork-friendly CI build. From their fork: [nonexistent9/microslate-firmware](https://github.com/nonexistent9/microslate-firmware)
 - **[lucidstack](https://github.com/lucidstack)** — fix for the reboot when pairing a new keyboard, caused by SD and display contention on the shared SPI bus. From their fork: [lucidstack/microslate-firmware](https://github.com/lucidstack/microslate-firmware)
 - **[Leticia-NdO](https://github.com/Leticia-NdO)** — the Ardosia writing firmware for the Xteink X4. From their fork, we took the text selection and clipboard feature (Ctrl+A/C/X/V, Shift+arrow selection), reimplemented in our editor, and the LE Secure Connections and bond-race fixes for keyboard pairing. From their fork: [Leticia-NdO/ardosia-firmware](https://github.com/Leticia-NdO/ardosia-firmware)
+
+The editor font is **[RIDIBatang (리디바탕)](https://ridicorp.com/ridibatang/)** by RIDI Corporation, licensed under the SIL Open Font License 1.1 (`lib/EpdFont/builtinFonts/source/RIDIBatang/OFL.txt`). Regenerate its bitmaps with `lib/EpdFont/scripts/convert-korean-fonts.sh`.
 
 The dual-boot build includes **[CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader)**, the open-source e-reader firmware, and its [website](https://crosspointreader.com). Thank you to the CrossPoint team.
 

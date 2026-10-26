@@ -36,7 +36,8 @@ enum class WritingMode : uint8_t {
 enum class KeyboardLayout : uint8_t {
   QWERTY = 0,
   RUSSIAN_JCUKEN = 1,
-  GERMAN_QWERTZ = 2
+  GERMAN_QWERTZ = 2,
+  KOREAN_2SET = 3   // 두벌식; letters go through the Hangul composer (hangul_ime.h)
 };
 
 // --- BLE Connection State ---
@@ -96,11 +97,17 @@ static constexpr int MAX_LINES = 1024;
 // --- Font Size ---
 enum class FontSize : uint8_t { SMALL = 0, MEDIUM = 1, LARGE = 2 };
 
+// Editor body text: RIDIBatang (Latin + all 11,172 Hangul syllables), with
+// NotoSans filling in Cyrillic and symbols. UI fonts borrow its Hangul.
+#define FONT_EDITOR_SMALL   (0x52420C)   // ridibatang 12
+#define FONT_EDITOR_MEDIUM  (0x52420E)   // ridibatang 14
+#define FONT_EDITOR_LARGE   (0x524210)   // ridibatang 16
+
 inline int editorFontId(FontSize size) {
   switch (size) {
-    case FontSize::SMALL:  return FONT_UI;    // notosans 12
-    case FontSize::MEDIUM: return FONT_BODY;  // notosans 14
-    default:               return FONT_LARGE; // notosans 16
+    case FontSize::SMALL:  return FONT_EDITOR_SMALL;
+    case FontSize::MEDIUM: return FONT_EDITOR_MEDIUM;
+    default:               return FONT_EDITOR_LARGE;
   }
 }
 
@@ -167,6 +174,10 @@ static constexpr uint8_t HID_KEY_END        = 0x4D;
 static constexpr uint8_t HID_KEY_CAPSLOCK   = 0x39;
 static constexpr uint8_t HID_KEY_F2         = 0x3B;
 static constexpr uint8_t HID_KEY_NON_US_BACKSLASH = 0x64;
+static constexpr uint8_t HID_KEY_LANG1      = 0x90;  // 한/영 on Korean keyboards
+// Not a HID usage: ble_keyboard sends this when Right Alt or Right GUI is
+// pressed and released on its own, so it can act as the 한/영 key.
+static constexpr uint8_t HID_KEY_RIGHT_MOD_TAP = 0xF0;
 
 // --- HID Modifier Masks ---
 static constexpr uint8_t MOD_CTRL_LEFT   = 0x01;

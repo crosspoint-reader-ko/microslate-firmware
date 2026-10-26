@@ -2,8 +2,11 @@
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <GfxRenderer.h>
+#include <Utf8.h>
 #include <esp_pm.h>
 #include <esp_ota_ops.h>
+#include <esp_rom_crc.h>
+#include <esp_spi_flash.h>
 #include <esp_app_format.h>
 #include <esp_task_wdt.h>
 #include <Preferences.h>
@@ -17,6 +20,7 @@
 #include "ui_renderer.h"
 #include "wifi_sync.h"
 #include "keyboard_layout.h"
+#include "i18n.h"
 
 // Enum for sleep reasons
 enum class SleepReason {
@@ -51,6 +55,14 @@ int pairedKeyboardSelection = 0;
 bool pairedForgetPending = false;   // true while a "Forget keyboard?" confirmation is armed
 Orientation currentOrientation = Orientation::PORTRAIT;
 int charsPerLine = 40;
+
+// Editor font used for line wrapping (refreshed each frame from fontSize).
+static const EpdFontFamily* wrapFont = nullptr;
+static int editorGlyphAdvance(uint32_t cp) {
+  const EpdGlyph* glyph = wrapFont->getGlyph(cp);
+  if (!glyph) glyph = wrapFont->getGlyph(REPLACEMENT_GLYPH);
+  return glyph ? glyph->advanceX : 0;
+}
 bool screenDirty = true;
 bool btShowAllDevices = true;    // Bluetooth scan: show ALL devices by default (HID classification
                                  // is unreliable — many keyboards don't advertise HID pre-connect,
@@ -132,6 +144,59 @@ static void detectOtaApps() {
   DBG_PRINTF("[OTA] Detected %d additional app(s)\n", otaAppCount);
 }
 
+// Select `dest` for the next boot by writing otadata directly, without
+// esp_ota_set_boot_partition's image verification. That check (IDF 4.4 here)
+// can reject an app built with a newer IDF even though the bootloader runs it
+// fine, e.g. the Korean CrossPoint fork. Same scheme as CrossPoint's
+// OtaBootSwitch and the web flasher; assumes two OTA slots.
+static bool writeOtadataFor(const esp_partition_t* dest) {
+  struct __attribute__((packed)) SelectEntry {
+    uint32_t ota_seq;
+    uint8_t seq_label[20];
+    uint32_t ota_state;
+    uint32_t crc;
+  };
+  static_assert(sizeof(SelectEntry) == 32, "otadata entry is 32 bytes");
+  auto seqCrc = [](uint32_t seq) {
+    return esp_rom_crc32_le(UINT32_MAX, reinterpret_cast<const uint8_t*>(&seq), sizeof(seq));
+  };
+
+  const esp_partition_t* otadata =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+  if (!otadata || otadata->size < 2 * SPI_FLASH_SEC_SIZE) return false;
+  const uint32_t destIdx = dest->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0;
+  if (destIdx > 15) return false;
+
+  SelectEntry slots[2] = {};
+  if (esp_partition_read(otadata, 0, &slots[0], sizeof(SelectEntry)) != ESP_OK ||
+      esp_partition_read(otadata, SPI_FLASH_SEC_SIZE, &slots[1], sizeof(SelectEntry)) != ESP_OK) {
+    return false;
+  }
+  int activeIdx = -1;
+  uint32_t activeSeq = 0;
+  for (int i = 0; i < 2; i++) {
+    if (slots[i].ota_seq == 0xFFFFFFFFu || slots[i].crc != seqCrc(slots[i].ota_seq)) continue;
+    if (slots[i].ota_state == ESP_OTA_IMG_INVALID || slots[i].ota_state == ESP_OTA_IMG_ABORTED) continue;
+    if (activeIdx < 0 || slots[i].ota_seq > activeSeq) {
+      activeIdx = i;
+      activeSeq = slots[i].ota_seq;
+    }
+  }
+
+  // The bootloader boots slot (seq - 1) % 2.
+  uint32_t newSeq = activeSeq + 1;
+  while (((newSeq - 1u) % 2u) != (destIdx % 2u)) newSeq++;
+  SelectEntry next = {};
+  next.ota_seq = newSeq;
+  memset(next.seq_label, 0xFF, sizeof(next.seq_label));
+  next.ota_state = ESP_OTA_IMG_NEW;
+  next.crc = seqCrc(newSeq);
+
+  const size_t off = (activeIdx == 0 ? 1 : 0) * SPI_FLASH_SEC_SIZE;
+  return esp_partition_erase_range(otadata, off, SPI_FLASH_SEC_SIZE) == ESP_OK &&
+         esp_partition_write(otadata, off, &next, sizeof(next)) == ESP_OK;
+}
+
 // Switch to another OTA app by index into otaApps[]. Non-static so input_handler can call it.
 void switchToOtaApp(int index) {
   if (index < 0 || index >= otaAppCount) return;
@@ -144,7 +209,10 @@ void switchToOtaApp(int index) {
     return;
   }
   DBG_PRINTF("[OTA] Switching to \"%s\" (subtype %d)...\n", otaApps[index].name, subtype);
-  esp_ota_set_boot_partition(target);
+  if (esp_ota_set_boot_partition(target) != ESP_OK && !writeOtadataFor(target)) {
+    DBG_PRINTLN("[OTA] Could not select the other app; staying here");
+    return;
+  }
   esp_restart();
 }
 
@@ -167,14 +235,19 @@ static void updateScreen() {
     lastOrientation = currentOrientation;
   }
 
-  // Auto-compute chars per line from font metrics so text always fills the screen
+  // Wrap editor lines by measured glyph width (Hangul is about twice as wide as
+  // Latin, so a fixed character count would overflow). charsPerLine stays as a
+  // fallback if the editor font is missing.
   {
     int sw = renderer.getScreenWidth();
     int textAreaWidth = sw - 20;  // 10px margins each side
     int avgCharW = renderer.getTextAdvanceX(editorFontId(fontSize), "abcdefghijklmnopqrstuvwxyz") / 26;
     if (avgCharW > 0) charsPerLine = textAreaWidth / avgCharW;
+    editorSetCharsPerLine(charsPerLine);
+
+    wrapFont = renderer.getFontFamily(editorFontId(fontSize));
+    editorSetWrapWidth(textAreaWidth, editorFontId(fontSize), wrapFont ? editorGlyphAdvance : nullptr);
   }
-  editorSetCharsPerLine(charsPerLine);
 
   switch (currentState) {
     case UIState::MAIN_MENU:         drawMainMenu(renderer, gpio); break;
@@ -209,6 +282,7 @@ void setup() {
   fontSize = static_cast<FontSize>(uiPrefs.getUChar("fontSize", 2));
   showWordCount = uiPrefs.getBool("showWC", true);
   currentKeyboardLayout = keyboardLayoutFromIndex(uiPrefs.getUChar("layout", 0));
+  setLanguage(languageFromIndex(uiPrefs.getUChar("lang", 0)));
 
   // Apply saved orientation
   {
@@ -228,7 +302,7 @@ void setup() {
 
   // Restore UI prefs from SD backup if NVS was wiped by a firmware flash
   if (!uiPrefs.isKey("orient")) {
-    static char uiBuf[128];
+    static char uiBuf[160];
     if (sdReadFile("/microslate/ui_prefs.json", uiBuf, sizeof(uiBuf))) {
       int o  = jsonGetInt(uiBuf, "orient");
       int d  = jsonGetInt(uiBuf, "dark");
@@ -236,12 +310,14 @@ void setup() {
       int fs = jsonGetInt(uiBuf, "fontSize");
       int wc = jsonGetInt(uiBuf, "showWC");
       int kl = jsonGetInt(uiBuf, "layout");
+      int lg = jsonGetInt(uiBuf, "lang");
       if (o  >= 0) { uiPrefs.putUChar("orient",    (uint8_t)o);  currentOrientation = static_cast<Orientation>(o); }
       if (d  >= 0) { uiPrefs.putBool("darkMode",   d != 0);      darkMode           = (d != 0); }
       if (wm >= 0) { uiPrefs.putUChar("writeMode", (uint8_t)wm); writingMode        = static_cast<WritingMode>(wm); }
       if (fs >= 0) { uiPrefs.putUChar("fontSize",  (uint8_t)fs); fontSize           = static_cast<FontSize>(fs); }
       if (wc >= 0) { uiPrefs.putBool("showWC",     wc != 0);     showWordCount      = (wc != 0); }
       if (kl >= 0) { uiPrefs.putUChar("layout",    (uint8_t)kl); currentKeyboardLayout = keyboardLayoutFromIndex(kl); }
+      if (lg >= 0) { uiPrefs.putUChar("lang",      (uint8_t)lg); setLanguage(languageFromIndex(lg)); }
       // Re-apply orientation in case it changed
       GfxRenderer::Orientation gfxOrient = GfxRenderer::Portrait;
       switch (currentOrientation) {
@@ -284,7 +360,7 @@ void setup() {
   autoReconnectEnabled = true;
 
   // Register this app's name in shared NVS and detect other OTA apps
-  registerOtaAppName("MicroSlate");
+  registerOtaAppName("MicroSlate (한글)");
   detectOtaApps();
 
   DBG_PRINTLN("MicroSlate ready.");
@@ -622,14 +698,14 @@ void renderSleepScreen() {
   renderer.drawText(FONT_BODY, titleX, titleY, title, true, EpdFontFamily::BOLD);
   
   // Subtitle: "Asleep"
-  const char* subtitle = "Asleep";
+  const char* subtitle = tr(StrId::ASLEEP);
   int subTitleWidth = renderer.getTextAdvanceX(FONT_UI, subtitle);
   int subTitleX = (sw - subTitleWidth) / 2;
   int subTitleY = sh * 0.48; // 48% down the screen (moved up)
   renderer.drawText(FONT_UI, subTitleX, subTitleY, subtitle, true);
   
   // Footer: "Hold Power to wake"
-  const char* footer = "Hold Power to wake";
+  const char* footer = tr(StrId::HOLD_POWER);
   int footerWidth = renderer.getTextAdvanceX(FONT_SMALL, footer);
   int footerX = (sw - footerWidth) / 2;
   int footerY = sh * 0.75; // 75% down the screen (moved up from bottom)
@@ -733,29 +809,41 @@ void loop() {
   static FontSize lastSavedFontSize = fontSize;
   static bool lastSavedShowWordCount = showWordCount;
   static KeyboardLayout lastSavedKeyboardLayout = currentKeyboardLayout;
+  static Language lastSavedLanguage = getLanguage();
+  // 한/영 can flip the layout many times a minute, so it is saved only once it
+  // has stayed put for a few seconds (the other settings save immediately).
+  static KeyboardLayout lastSeenKeyboardLayout = currentKeyboardLayout;
+  static unsigned long layoutChangedMs = 0;
+  if (currentKeyboardLayout != lastSeenKeyboardLayout) {
+    lastSeenKeyboardLayout = currentKeyboardLayout;
+    layoutChangedMs = millis();
+  }
+  const bool layoutDue = currentKeyboardLayout != lastSavedKeyboardLayout && millis() - layoutChangedMs >= 5000;
   if (currentOrientation != lastSavedOrientation || darkMode != lastSavedDarkMode
       || writingMode != lastSavedWritingMode || fontSize != lastSavedFontSize
-      || showWordCount != lastSavedShowWordCount
-      || currentKeyboardLayout != lastSavedKeyboardLayout) {
+      || showWordCount != lastSavedShowWordCount || getLanguage() != lastSavedLanguage
+      || layoutDue) {
     uiPrefs.putUChar("orient", static_cast<uint8_t>(currentOrientation));
     uiPrefs.putBool("darkMode", darkMode);
     uiPrefs.putUChar("writeMode", static_cast<uint8_t>(writingMode));
     uiPrefs.putUChar("fontSize", static_cast<uint8_t>(fontSize));
     uiPrefs.putBool("showWC", showWordCount);
     uiPrefs.putUChar("layout", static_cast<uint8_t>(currentKeyboardLayout));
+    uiPrefs.putUChar("lang", static_cast<uint8_t>(getLanguage()));
     lastSavedOrientation = currentOrientation;
     lastSavedDarkMode = darkMode;
     lastSavedWritingMode = writingMode;
     lastSavedFontSize = fontSize;
     lastSavedShowWordCount = showWordCount;
     lastSavedKeyboardLayout = currentKeyboardLayout;
+    lastSavedLanguage = getLanguage();
     // Keep SD backup in sync so settings survive a firmware flash
     static char uiBuf[160];
     snprintf(uiBuf, sizeof(uiBuf),
-             "{\"orient\":%d,\"dark\":%d,\"writeMode\":%d,\"fontSize\":%d,\"showWC\":%d,\"layout\":%d}",
+             "{\"orient\":%d,\"dark\":%d,\"writeMode\":%d,\"fontSize\":%d,\"showWC\":%d,\"layout\":%d,\"lang\":%d}",
              (int)currentOrientation, darkMode ? 1 : 0,
              (int)writingMode, (int)fontSize, showWordCount ? 1 : 0,
-             (int)currentKeyboardLayout);
+             (int)currentKeyboardLayout, (int)getLanguage());
     if (!SdMan.exists("/microslate")) SdMan.mkdir("/microslate");
     sdWriteFile("/microslate/ui_prefs.json", uiBuf);
   }

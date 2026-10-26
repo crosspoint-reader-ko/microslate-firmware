@@ -14,6 +14,7 @@ parser.add_argument("name", action="store", help="name of the font.")
 parser.add_argument("size", type=int, help="font size to use.")
 parser.add_argument("fontstack", action="store", nargs='+', help="list of font files, ordered by descending priority.")
 parser.add_argument("--2bit", dest="is2Bit", action="store_true", help="generate 2-bit greyscale bitmap instead of 1-bit black and white.")
+parser.add_argument("--threshold", dest="threshold", type=int, default=2, help="1-bit only: 4-bit coverage (1-15) at which a pixel turns black. Default 2.")
 parser.add_argument("--additional-intervals", dest="additional_intervals", action="append", help="Additional code point intervals to export as min,max. This argument can be repeated.")
 args = parser.parse_args()
 
@@ -216,7 +217,7 @@ for i_start, i_end in intervals:
             #     print(line)
             # print('')
         else:
-            # Downsample to 1-bit bitmap - treat any 2+ as black
+            # Downsample to 1-bit bitmap - coverage >= --threshold (default 2) is black
             pixelsbw = []
             px = 0
             pitch = (bitmap.width // 2) + (bitmap.width % 2)
@@ -224,7 +225,8 @@ for i_start, i_end in intervals:
                 for x in range(bitmap.width):
                     px = px << 1
                     bm = pixels4g[y * pitch + (x // 2)]
-                    px += 1 if ((x & 1) == 0 and bm & 0xE > 0) or ((x & 1) == 1 and bm & 0xE0 > 0) else 0
+                    bm = (bm >> ((x % 2) * 4)) & 0xF
+                    px += 1 if bm >= args.threshold else 0
 
                     if (y * bitmap.width + x) % 8 == 7:
                         pixelsbw.append(px)

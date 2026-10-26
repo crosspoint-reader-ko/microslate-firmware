@@ -2,7 +2,7 @@
 
 #include "config.h"
 
-static constexpr int KEYBOARD_LAYOUT_COUNT = 3;
+static constexpr int KEYBOARD_LAYOUT_COUNT = 4;
 
 KeyboardLayout keyboardLayoutFromIndex(int index);
 KeyboardLayout keyboardLayoutNext(KeyboardLayout layout);
@@ -11,7 +11,13 @@ const char* keyboardLayoutName(KeyboardLayout layout);
 const char* keyboardLayoutShortName(KeyboardLayout layout);
 
 // Returns a UTF-8 string literal for printable keys, or nullptr for non-printable keys.
+// For KOREAN_2SET, letter keys return nullptr: the caller feeds them to the
+// Hangul composer (keyboardLayoutIsHangul + hangulJamoForKey). Other keys type
+// as US QWERTY.
 const char* keyboardLayoutText(KeyboardLayout layout, uint8_t hid, uint8_t modifiers, bool capsLockOn);
+
+// True when `layout` composes Hangul from letter keys.
+inline bool keyboardLayoutIsHangul(KeyboardLayout layout) { return layout == KeyboardLayout::KOREAN_2SET; }
 
 // US QWERTY is used in fields where ASCII input is expected, regardless of editor layout.
 const char* keyboardLayoutQwertyText(uint8_t hid, uint8_t modifiers, bool capsLockOn);

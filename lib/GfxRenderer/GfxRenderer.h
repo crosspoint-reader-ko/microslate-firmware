@@ -54,6 +54,10 @@ class GfxRenderer {
 
   // Setup
   void insertFont(int fontId, EpdFontFamily font);
+  const EpdFontFamily* getFontFamily(int fontId) const {
+    const auto it = fontMap.find(fontId);
+    return it == fontMap.end() ? nullptr : &it->second;
+  }
 
   // Orientation control (affects logical width/height and coordinate transforms)
   void setOrientation(const Orientation o) { orientation = o; }

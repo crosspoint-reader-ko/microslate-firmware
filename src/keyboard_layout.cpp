@@ -203,6 +203,7 @@ const char* keyboardLayoutName(KeyboardLayout layout) {
   switch (layout) {
     case KeyboardLayout::RUSSIAN_JCUKEN: return "RU ЙЦУКЕН";
     case KeyboardLayout::GERMAN_QWERTZ:  return "DE QWERTZ";
+    case KeyboardLayout::KOREAN_2SET:    return "KO 두벌식";
     case KeyboardLayout::QWERTY:
     default:                             return "US QWERTY";
   }
@@ -212,6 +213,7 @@ const char* keyboardLayoutShortName(KeyboardLayout layout) {
   switch (layout) {
     case KeyboardLayout::RUSSIAN_JCUKEN: return "RU";
     case KeyboardLayout::GERMAN_QWERTZ:  return "DE";
+    case KeyboardLayout::KOREAN_2SET:    return "한";
     case KeyboardLayout::QWERTY:
     default:                             return "US";
   }
@@ -227,6 +229,9 @@ const char* keyboardLayoutText(KeyboardLayout layout, uint8_t hid, uint8_t modif
       return lookupKey(russianKeys, hid, modifiers, capsLockOn);
     case KeyboardLayout::GERMAN_QWERTZ:
       return lookupKey(germanKeys, hid, modifiers, capsLockOn);
+    case KeyboardLayout::KOREAN_2SET:
+      if (hid >= HID_KEY_A && hid <= HID_KEY_Z) return nullptr;  // composed by hangul_ime
+      return keyboardLayoutQwertyText(hid, modifiers, capsLockOn);
     case KeyboardLayout::QWERTY:
     default:
       return keyboardLayoutQwertyText(hid, modifiers, capsLockOn);

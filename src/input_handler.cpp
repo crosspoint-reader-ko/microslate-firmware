@@ -4,6 +4,8 @@
 #include "ble_keyboard.h"
 #include "wifi_sync.h"
 #include "keyboard_layout.h"
+#include "hangul_ime.h"
+#include "i18n.h"
 
 #include <Arduino.h>
 #include <SDCardManager.h>
@@ -106,9 +108,100 @@ char hidToAscii(uint8_t hid, uint8_t modifiers) {
   return text[0];
 }
 
+// --- Hangul input ---
+// Layout to return to when 한/영 leaves Korean. Set each time Korean is entered.
+static KeyboardLayout latinLayout = KeyboardLayout::QWERTY;
+
+// Shift+Space, 한/영 key, Ctrl+Space, or a lone tap of Right Alt / Right GUI. The tap is
+// ignored on layouts that use Right Alt as AltGr (German, Russian).
+static bool isHangulToggle(uint8_t keyCode, uint8_t modifiers) {
+  if (keyCode == HID_KEY_LANG1) return true;
+  // Shift alone: Shift+Ctrl/Alt/GUI+Space is left for other shortcuts.
+  if (keyCode == HID_KEY_SPACE && isShift(modifiers) && (modifiers & ~(MOD_SHIFT_LEFT | MOD_SHIFT_RIGHT)) == 0) {
+    return true;
+  }
+  if (keyCode == HID_KEY_SPACE && isCtrl(modifiers) && !isAltGr(modifiers)) return true;
+  if (keyCode == HID_KEY_RIGHT_MOD_TAP) {
+    return currentKeyboardLayout == KeyboardLayout::QWERTY || keyboardLayoutIsHangul(currentKeyboardLayout);
+  }
+  return false;
+}
+
+// Every layout change goes through here so 한/영 knows where to return.
+static void setKeyboardLayout(KeyboardLayout layout) {
+  hangulCommit();
+  if (!keyboardLayoutIsHangul(currentKeyboardLayout)) latinLayout = currentKeyboardLayout;
+  currentKeyboardLayout = layout;
+}
+
+static void toggleHangul() {
+  setKeyboardLayout(keyboardLayoutIsHangul(currentKeyboardLayout) ? latinLayout : KeyboardLayout::KOREAN_2SET);
+  screenDirty = true;
+}
+
+// Jamo for this key in the Korean layout, or 0 when the key is not a jamo key
+// (Ctrl/AltGr chords stay shortcuts).
+static uint32_t hangulJamoFor(uint8_t keyCode, uint8_t modifiers) {
+  if (!keyboardLayoutIsHangul(currentKeyboardLayout)) return 0;
+  if (isCtrl(modifiers) || isAltGr(modifiers)) return 0;
+  return hangulJamoForKey(keyCode, isShift(modifiers));
+}
+
+// Bytes the edit adds to a field. A preedit is always one 3-byte jamo or syllable.
+static int hangulEditGrowth(const HangulEdit& e) {
+  return (int)strlen(e.commit) + (int)strlen(e.preedit) - (e.hadPreedit ? 3 : 0);
+}
+
+// Replace the preedit at the editor cursor with the edit's commit + new preedit.
+static void applyHangulToEditor(const HangulEdit& e) {
+  char text[sizeof(e.commit) + sizeof(e.preedit)];
+  strcpy(text, e.commit);
+  strcat(text, e.preedit);
+  if (!editorReplaceBeforeCursor(e.hadPreedit, text)) {
+    hangulCommit();  // note is full: keep what is on screen, drop the key
+  }
+}
+
+static void dropLastUtf8Char(char* buf, int* len) {
+  if (*len <= 0) return;
+  int i = *len - 1;
+  while (i > 0 && (static_cast<uint8_t>(buf[i]) & 0xC0) == 0x80) i--;
+  *len = i;
+  buf[i] = '\0';
+}
+
+// Same as applyHangulToEditor, for the find query (the preedit is always at its end).
+static void applyHangulToFind(const HangulEdit& e) {
+  if (findBufferLen + hangulEditGrowth(e) >= MAX_FIND_LEN) {
+    hangulCommit();
+    return;
+  }
+  if (e.hadPreedit) dropLastUtf8Char(findBuffer, &findBufferLen);
+  strcpy(findBuffer + findBufferLen, e.commit);
+  findBufferLen += strlen(e.commit);
+  strcpy(findBuffer + findBufferLen, e.preedit);
+  findBufferLen += strlen(e.preedit);
+}
+
 // Handle the in-document find overlay. Enter searches / finds next, Esc closes,
 // Backspace edits the query, printable keys extend it.
 static void handleFindKey(uint8_t keyCode, uint8_t modifiers) {
+  if (const uint32_t jamo = hangulJamoFor(keyCode, modifiers)) {
+    applyHangulToFind(hangulInput(jamo));
+    screenDirty = true;
+    return;
+  }
+  if (keyCode == HID_KEY_BACKSPACE) {
+    HangulEdit e;
+    if (hangulBackspace(&e)) {
+      applyHangulToFind(e);
+    } else {
+      dropLastUtf8Char(findBuffer, &findBufferLen);
+    }
+    screenDirty = true;
+    return;
+  }
+  hangulCommit();
   if (keyCode == HID_KEY_ESCAPE) {
     editorFindMode = false;
     screenDirty = true;
@@ -116,14 +209,6 @@ static void handleFindKey(uint8_t keyCode, uint8_t modifiers) {
   }
   if (keyCode == HID_KEY_ENTER) {
     if (findBufferLen > 0) editorFindNext(findBuffer);
-    screenDirty = true;
-    return;
-  }
-  if (keyCode == HID_KEY_BACKSPACE) {
-    if (findBufferLen > 0) {
-      findBufferLen--;
-      findBuffer[findBufferLen] = '\0';
-    }
     screenDirty = true;
     return;
   }
@@ -140,11 +225,33 @@ static void handleFindKey(uint8_t keyCode, uint8_t modifiers) {
 
 // Handle text editor input
 static void handleEditorKey(uint8_t keyCode, uint8_t modifiers) {
+  if (isHangulToggle(keyCode, modifiers)) {
+    toggleHangul();
+    return;
+  }
+
   // Find overlay takes over input while active.
   if (editorFindMode) {
     handleFindKey(keyCode, modifiers);
     return;
   }
+
+  // Korean letters compose in place; Backspace undoes one jamo while composing.
+  // Any other key finishes the syllable first.
+  if (const uint32_t jamo = hangulJamoFor(keyCode, modifiers)) {
+    applyHangulToEditor(hangulInput(jamo));
+    screenDirty = true;
+    return;
+  }
+  if (keyCode == HID_KEY_BACKSPACE && !isCtrl(modifiers)) {
+    HangulEdit e;
+    if (hangulBackspace(&e)) {
+      applyHangulToEditor(e);
+      screenDirty = true;
+      return;
+    }
+  }
+  hangulCommit();
 
   // Ctrl shortcuts
   if (isCtrl(modifiers) && !isAltGr(modifiers)) {
@@ -182,7 +289,7 @@ static void handleEditorKey(uint8_t keyCode, uint8_t modifiers) {
       return;
     }
     if (keyCode == HID_KEY_K) {
-      currentKeyboardLayout = keyboardLayoutNext(currentKeyboardLayout);
+      setKeyboardLayout(keyboardLayoutNext(currentKeyboardLayout));
       screenDirty = true;
       return;
     }
@@ -338,6 +445,10 @@ static void handleRenameKey(uint8_t keyCode, uint8_t modifiers) {
 static void dispatchEvent(const KeyEvent& event) {
   if (!event.pressed) return;
 
+  // A syllable in progress belongs to the editor (or its find bar); leaving
+  // finishes it so the next note does not replace a character it never typed.
+  if (currentState != UIState::TEXT_EDITOR) hangulCommit();
+
   switch (currentState) {
     case UIState::MAIN_MENU: {
       int menuCount = 4 + otaAppCount;
@@ -422,7 +533,7 @@ static void dispatchEvent(const KeyEvent& event) {
       break;
 
     case UIState::SETTINGS: {
-      const int SETTINGS_COUNT = 8;  // Orientation, Dark Mode, Writing Mode, Font Size, Layout, BLE Power, Bluetooth, Paired Keyboards
+      const int SETTINGS_COUNT = 9;  // Orientation, Dark Mode, Writing Mode, Font Size, Layout, BLE Power, Bluetooth, Paired Keyboards, Language
 
       // Up/Down: navigate settings list (physical buttons also map here)
       if (event.keyCode == HID_KEY_DOWN) {
@@ -446,7 +557,7 @@ static void dispatchEvent(const KeyEvent& event) {
           int v = static_cast<int>(fontSize);
           fontSize = static_cast<FontSize>((v + 1) % 3);
         } else if (settingsSelection == 4) {
-          currentKeyboardLayout = keyboardLayoutNext(currentKeyboardLayout);
+          setKeyboardLayout(keyboardLayoutNext(currentKeyboardLayout));
         } else if (settingsSelection == 5) {
           cycleBleTxPower(+1);   // more power (adjustable in place, like Font Size)
         } else if (settingsSelection == 6) {
@@ -457,6 +568,8 @@ static void dispatchEvent(const KeyEvent& event) {
           pairedKeyboardSelection = 0;
           pairedForgetPending = false;
           currentState = UIState::PAIRED_KEYBOARDS;
+        } else if (settingsSelection == 8) {
+          setLanguage(languageNext(getLanguage()));
         }
         screenDirty = true;
 
@@ -474,9 +587,11 @@ static void dispatchEvent(const KeyEvent& event) {
           int v = static_cast<int>(fontSize);
           fontSize = static_cast<FontSize>((v - 1 + 3) % 3);
         } else if (settingsSelection == 4) {
-          currentKeyboardLayout = keyboardLayoutPrev(currentKeyboardLayout);
+          setKeyboardLayout(keyboardLayoutPrev(currentKeyboardLayout));
         } else if (settingsSelection == 5) {
           cycleBleTxPower(-1);   // less power
+        } else if (settingsSelection == 8) {
+          setLanguage(languagePrev(getLanguage()));
         }
         screenDirty = true;
 

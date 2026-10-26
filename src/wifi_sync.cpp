@@ -2,6 +2,7 @@
 #include "config.h"
 #include "file_manager.h"
 #include "sd_backup.h"
+#include "i18n.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -261,7 +262,7 @@ static void forgetCredential(const char* ssid) {
 
 static void beginScan() {
   syncState = SyncState::SCANNING;
-  strcpy(statusText, "Scanning...");
+  snprintf(statusText, sizeof(statusText), "%s", tr(StrId::SCANNING));
   networkCount = 0;
   selectedNet = 0;
   WiFi.mode(WIFI_STA);
@@ -279,7 +280,7 @@ static void processScanResults() {
     // Scan failed or no networks found
     networkCount = 0;
     syncState = SyncState::NETWORK_LIST;
-    strcpy(statusText, n == 0 ? "No networks found" : "Scan failed");
+    snprintf(statusText, sizeof(statusText), "%s", tr(n == 0 ? StrId::NO_NETWORKS : StrId::SCAN_FAILED));
     WiFi.scanDelete();
     screenDirty = true;
     return;
@@ -361,7 +362,7 @@ static void beginConnect(const char* ssid, const char* pass) {
   strncpy(connectingSSID, ssid, 32);
   connectingSSID[32] = '\0';
   syncState = SyncState::CONNECTING;
-  snprintf(statusText, sizeof(statusText), "Connecting to %s...", ssid);
+  snprintf(statusText, sizeof(statusText), tr(StrId::CONNECTING_TO_FMT), ssid);
   connectStartMs = millis();
 
   WiFi.disconnect(true);
@@ -391,9 +392,9 @@ static void enterDoneState() {
   doneStartMs = millis();
 
   if (filesSent == 0 && filesReceived == 0) {
-    strcpy(statusText, "No changes");
+    snprintf(statusText, sizeof(statusText), "%s", tr(StrId::NO_CHANGES));
   } else {
-    snprintf(statusText, sizeof(statusText), "Sent: %d  Received: %d",
+    snprintf(statusText, sizeof(statusText), tr(StrId::SENT_RECV_FMT),
              filesSent, filesReceived);
   }
   screenDirty = true;
@@ -416,7 +417,7 @@ static void pollConnection() {
 
   if (millis() - connectStartMs > 25000) {
     WiFi.disconnect(true);
-    strcpy(statusText, "Connection failed");
+    snprintf(statusText, sizeof(statusText), "%s", tr(StrId::CONN_FAILED));
 
     if (usedSavedPassword) {
       syncState = SyncState::FORGET_PROMPT;
