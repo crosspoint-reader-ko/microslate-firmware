@@ -223,12 +223,14 @@ void drawMainMenu(GfxRenderer& renderer, HalGPIO& gpio) {
     }
   }
 
-  // Footer
-  constexpr int bm = 60;
+  // Footer: hint and keyboard status on two lines, spaced by the small font's
+  // line height (the Korean UI font is taller than the old fixed 16 px step).
+  const int smallH = renderer.getLineHeight(FONT_SMALL);
+  const int bm = 2 * smallH + 16;
   if (sh > bm + 40) {
     clippedLine(renderer, 10, sh - bm, sw - 10, sh - bm, tc);
-    drawClippedText(renderer, FONT_SMALL, 20, sh - bm + 12, tr(StrId::HINT_MAIN), 0, tc);
-    drawBleStatus(renderer, 20, sh - bm + 28);
+    drawClippedText(renderer, FONT_SMALL, 20, sh - bm + 6, tr(StrId::HINT_MAIN), 0, tc);
+    drawBleStatus(renderer, 20, sh - bm + 8 + smallH);
   }
   drawBattery(renderer, gpio);
 
